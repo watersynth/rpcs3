@@ -473,9 +473,9 @@ void game_list_frame::OnParsingFinished()
 	sort(m_path_entries.begin(), m_path_entries.end(), [](const path_entry& l, const path_entry& r){return l.path < r.path;});
 	m_path_entries.erase(unique(m_path_entries.begin(), m_path_entries.end(), [](const path_entry& l, const path_entry& r){return l.path == r.path;}), m_path_entries.end());
 
-	const std::string game_icon_path = fs::get_config_dir() + "/Icons/game_icons/";
+	const std::string game_icon_path = m_play_hover_movies ? fs::get_config_dir() + "/Icons/game_icons/" : "";
 
-	const auto add_game = [this, dev_flash, cat_unknown_localized = sstr(localized.category.unknown), cat_unknown = sstr(cat::cat_unknown), game_icon_path, _hdd, play_hover_movies = m_play_hover_movies, show_custom_icons = m_show_custom_icons](const std::string& dir_or_elf)
+	const auto add_game = [this, dev_flash, cat_unknown_localized = sstr(localized.category.unknown), cat_unknown = sstr(cat::cat_unknown), game_icon_path](const std::string& dir_or_elf)
 	{
 		GameInfo game{};
 		game.path = dir_or_elf;
@@ -497,7 +497,6 @@ void game_list_frame::OnParsingFinished()
 			game.serial = dir_or_elf.substr(dir_or_elf.find_last_of(fs::delim) + 1);
 			game.category = cat::cat_ps3_os.toStdString(); // Key for operating system executables
 			game.version = utils::get_firmware_version();
-			game.app_ver = game.version;
 			game.fw = game.version;
 			game.bootable = 1;
 			game.icon_path = dev_flash + "vsh/resource/explore/icon/icon_home.png";
@@ -517,7 +516,7 @@ void game_list_frame::OnParsingFinished()
 				}
 			}
 
-			if (game.name.empty())
+			if (game.name == "Unknown")
 			{
 				game.name = game.serial;
 			}
@@ -536,27 +535,20 @@ void game_list_frame::OnParsingFinished()
 			game.bootable     = psf::get_integer(psf, "BOOTABLE", 0);
 			game.attr         = psf::get_integer(psf, "ATTRIBUTE", 0);
 			game.icon_path    = sfo_dir + "/ICON0.PNG";
-			game.movie_path   = sfo_dir + "/ICON1.PAM";
 
 			if (game.category == "DG")
 			{
-				const std::string game_data_dir = _hdd + "game/" + game.serial;
-
-				if (std::string latest_icon = game_data_dir + "/ICON0.PNG"; fs::is_file(latest_icon))
+				std::string latest_icon = rpcs3::utils::get_hdd0_dir() + "game/" + game.serial + "/ICON0.PNG";
+				if (fs::is_file(latest_icon))
 				{
 					game.icon_path = std::move(latest_icon);
-				}
-
-				if (std::string latest_movie = game_data_dir + "/ICON1.PAM"; fs::is_file(latest_movie))
-				{
-					game.movie_path = std::move(latest_movie);
 				}
 			}
 		}
 
-		if (show_custom_icons)
+		if (m_show_custom_icons)
 		{
-			if (std::string icon_path = game_icon_path + game.serial + "/ICON0.PNG"; fs::is_file(icon_path))
+			if (std::string icon_path = fs::get_config_dir() + "/Icons/game_icons/" + game.serial + "/ICON0.PNG"; fs::is_file(icon_path))
 			{
 				game.icon_path = std::move(icon_path);
 			}
@@ -622,13 +614,6 @@ void game_list_frame::OnParsingFinished()
 		info.hasCustomConfig = fs::is_file(rpcs3::utils::get_custom_config_path(info.info.serial));
 		info.hasCustomPadConfig = fs::is_file(rpcs3::utils::get_custom_input_config_path(info.info.serial));
 		info.has_hover_gif = fs::is_file(game_icon_path + info.info.serial + "/hover.gif");
-		info.has_hover_pam = fs::is_file(info.info.movie_path);
-
-		// Free some memory
-		if (!info.has_hover_pam)
-		{
-			info.info.movie_path.clear();
-		}
 
 		m_games.push(std::make_shared<gui_game_info>(std::move(info)));
 	};
@@ -813,11 +798,6 @@ void game_list_frame::OnRefreshFinished()
 		m_progress_dialog->deleteLater();
 		m_progress_dialog = nullptr;
 	}
-
-	// Emit signal and remove slots
-	Q_EMIT Refreshed();
-	m_refresh_funcs_manage_type.reset();
-	m_refresh_funcs_manage_type.emplace();
 }
 
 void game_list_frame::OnCompatFinished()
@@ -1098,9 +1078,9 @@ void game_list_frame::ShowContextMenu(const QPoint &pos)
 		});
 	}
 
-	extern bool is_savestate_compatible(fs::file&& file, std::string_view filepath);
+	extern bool is_savestate_compatible(const fs::file& file);
 
-	if (const std::string sstate = get_savestate_file(current_game.serial, current_game.path, 0, 0); is_savestate_compatible(fs::file(sstate), sstate))
+	if (const std::string sstate = get_savestate_file(current_game.serial, current_game.path, 0, 0); is_savestate_compatible(fs::file(sstate)))
 	{
 		QAction* boot_state = menu.addAction(is_current_running_game
 			? tr("&Reboot with savestate")
@@ -1116,14 +1096,12 @@ void game_list_frame::ShowContextMenu(const QPoint &pos)
 
 	QAction* configure = menu.addAction(gameinfo->hasCustomConfig
 		? tr("&Change Custom Configuration")
-		: tr("&Create Custom Configuration From Global Settings"));
-	QAction* create_game_default_config = gameinfo->hasCustomConfig ? nullptr
-		: menu.addAction(tr("&Create Custom Configuration From Default Settings"));
+		: tr("&Create Custom Configuration"));
 	QAction* pad_configure = menu.addAction(gameinfo->hasCustomPadConfig
 		? tr("&Change Custom Gamepad Configuration")
 		: tr("&Create Custom Gamepad Configuration"));
 	QAction* configure_patches = menu.addAction(tr("&Manage Game Patches"));
-	QAction* create_cpu_cache = menu.addAction(tr("&Create LLVM Cache"));
+	QAction* create_ppu_cache = menu.addAction(tr("&Create PPU Cache"));
 
 	menu.addSeparator();
 
@@ -1424,11 +1402,9 @@ void game_list_frame::ShowContextMenu(const QPoint &pos)
 		sys_log.notice("Booting from gamelist per context menu...");
 		Q_EMIT RequestBoot(gameinfo, cfg_mode::global);
 	});
-
-	auto configure_l = [this, current_game, gameinfo](bool create_cfg_from_global_cfg)
+	connect(configure, &QAction::triggered, this, [this, current_game, gameinfo]()
 	{
-		settings_dialog dlg(m_gui_settings, m_emu_settings, 0, this, &current_game, create_cfg_from_global_cfg);
-
+		settings_dialog dlg(m_gui_settings, m_emu_settings, 0, this, &current_game);
 		connect(&dlg, &settings_dialog::EmuSettingsApplied, [this, gameinfo]()
 		{
 			if (!gameinfo->hasCustomConfig)
@@ -1438,20 +1414,8 @@ void game_list_frame::ShowContextMenu(const QPoint &pos)
 			}
 			Q_EMIT NotifyEmuSettingsChange();
 		});
-
 		dlg.exec();
-	};
-
-	if (create_game_default_config)
-	{
-		connect(configure, &QAction::triggered, this, [configure_l]() { configure_l(true); });
-		connect(create_game_default_config, &QAction::triggered, this, [configure_l = std::move(configure_l)]() { configure_l(false); });
-	}
-	else
-	{
-		connect(configure, &QAction::triggered, this, [configure_l = std::move(configure_l)]() { configure_l(true); });
-	}
-
+	});
 	connect(pad_configure, &QAction::triggered, this, [this, current_game, gameinfo]()
 	{
 		pad_settings_dialog dlg(m_gui_settings, this, &current_game);
@@ -1472,11 +1436,11 @@ void game_list_frame::ShowContextMenu(const QPoint &pos)
 		m_gui_settings->SetValue(gui::gl_hidden_list, QStringList(m_hidden_list.values()));
 		Refresh();
 	});
-	connect(create_cpu_cache, &QAction::triggered, this, [gameinfo, this]
+	connect(create_ppu_cache, &QAction::triggered, this, [gameinfo, this]
 	{
 		if (m_gui_settings->GetBootConfirmation(this))
 		{
-			CreateCPUCaches(gameinfo);
+			CreatePPUCache(gameinfo);
 		}
 	});
 	connect(remove_game, &QAction::triggered, this, [this, current_game, gameinfo, cache_base_dir, name]
@@ -1648,24 +1612,23 @@ void game_list_frame::ShowContextMenu(const QPoint &pos)
 	menu.exec(global_pos);
 }
 
-bool game_list_frame::CreateCPUCaches(const std::string& path, const std::string& serial)
+bool game_list_frame::CreatePPUCache(const std::string& path, const std::string& serial)
 {
 	Emu.GracefulShutdown(false);
 	Emu.SetForceBoot(true);
 
 	if (const auto error = Emu.BootGame(fs::is_file(path) ? fs::get_parent_dir(path) : path, serial, true); error != game_boot_result::no_errors)
 	{
-		game_list_log.error("Could not create LLVM caches for %s, error: %s", path, error);
+		game_list_log.error("Could not create PPU Cache for %s, error: %s", path, error);
 		return false;
 	}
-
-	game_list_log.warning("Creating LLVM Caches for %s", path);
+	game_list_log.warning("Creating PPU Cache for %s", path);
 	return true;
 }
 
-bool game_list_frame::CreateCPUCaches(const game_info& game)
+bool game_list_frame::CreatePPUCache(const game_info& game)
 {
-	return game && CreateCPUCaches(game->info.path, game->info.serial);
+	return game && CreatePPUCache(game->info.path, game->info.serial);
 }
 
 bool game_list_frame::RemoveCustomConfiguration(const std::string& title_id, const game_info& game, bool is_interactive)
@@ -1720,10 +1683,10 @@ bool game_list_frame::RemoveCustomPadConfiguration(const std::string& title_id, 
 		: tr("Remove custom pad configuration?")) != QMessageBox::Yes)
 		return true;
 
-	g_cfg_input_configs.load();
-	g_cfg_input_configs.active_configs.erase(title_id);
-	g_cfg_input_configs.save();
-	game_list_log.notice("Removed active input configuration entry for key '%s'", title_id);
+	g_cfg_profile.load();
+	g_cfg_profile.active_profiles.erase(title_id);
+	g_cfg_profile.save();
+	game_list_log.notice("Removed active pad profile entry for key '%s'", title_id);
 
 	if (QDir(qstr(config_dir)).removeRecursively())
 	{
@@ -1944,15 +1907,15 @@ void game_list_frame::RemoveHDD1Cache(const std::string& base_dir, const std::st
 		game_list_log.fatal("Only %d/%d HDD1 cache directories could be removed in %s (%s)", dirs_removed, dirs_total, base_dir, title_id);
 }
 
-void game_list_frame::BatchCreateCPUCaches(const QList<game_info>& game_data)
+void game_list_frame::BatchCreatePPUCaches()
 {
 	const std::string vsh_path = g_cfg_vfs.get_dev_flash() + "vsh/module/";
-	const bool vsh_exists = game_data.isEmpty() && fs::is_file(vsh_path + "vsh.self");
-	const u32 total = !game_data.isEmpty() ? game_data.size() : (m_game_data.size() + (vsh_exists ? 1 : 0));
+	const bool vsh_exists = fs::is_file(vsh_path + "vsh.self");
+	const u32 total = m_game_data.size() + (vsh_exists ? 1 : 0);
 
 	if (total == 0)
 	{
-		QMessageBox::information(this, tr("LLVM Cache Batch Creation"), tr("No titles found"), QMessageBox::Ok);
+		QMessageBox::information(this, tr("PPU Cache Batch Creation"), tr("No titles found"), QMessageBox::Ok);
 		return;
 	}
 
@@ -1961,10 +1924,9 @@ void game_list_frame::BatchCreateCPUCaches(const QList<game_info>& game_data)
 		return;
 	}
 
-	const QString main_label = tr("Creating all LLVM caches");
+	const QString main_label = tr("Creating all PPU caches");
 
-	progress_dialog* pdlg = new progress_dialog(tr("LLVM Cache Batch Creation"), main_label, tr("Cancel"), 0, total, false, this);
-	pdlg->setWindowFlags(Qt::Window | Qt::WindowMinimizeButtonHint);
+	progress_dialog* pdlg = new progress_dialog(tr("PPU Cache Batch Creation"), main_label, tr("Cancel"), 0, total, true, this);
 	pdlg->setAutoClose(false);
 	pdlg->setAutoReset(false);
 	pdlg->show();
@@ -1990,13 +1952,13 @@ void game_list_frame::BatchCreateCPUCaches(const QList<game_info>& game_data)
 		pdlg->setLabelText(tr("%0\nProgress: %1/%2. Compiling caches for VSH...", "Second line after main label").arg(main_label).arg(created).arg(total));
 		QApplication::processEvents();
 
-		if (CreateCPUCaches(vsh_path) && wait_until_compiled())
+		if (CreatePPUCache(vsh_path) && wait_until_compiled())
 		{
 			pdlg->SetValue(++created);
 		}
 	}
 
-	for (const auto& game : (game_data.isEmpty() ? m_game_data : game_data))
+	for (const auto& game : m_game_data)
 	{
 		if (pdlg->wasCanceled() || g_system_progress_canceled)
 		{
@@ -2006,7 +1968,7 @@ void game_list_frame::BatchCreateCPUCaches(const QList<game_info>& game_data)
 		pdlg->setLabelText(tr("%0\nProgress: %1/%2. Compiling caches for %3...", "Second line after main label").arg(main_label).arg(created).arg(total).arg(qstr(game->info.serial)));
 		QApplication::processEvents();
 
-		if (CreateCPUCaches(game) && wait_until_compiled())
+		if (CreatePPUCache(game) && wait_until_compiled())
 		{
 			pdlg->SetValue(++created);
 		}
@@ -2014,17 +1976,24 @@ void game_list_frame::BatchCreateCPUCaches(const QList<game_info>& game_data)
 
 	if (pdlg->wasCanceled() || g_system_progress_canceled)
 	{
-		pdlg->deleteLater(); // We did not allow deletion earlier to prevent segfaults when canceling.
-		game_list_log.notice("LLVM Cache Batch Creation was canceled");
-		Emu.GracefulShutdown(false);
+		game_list_log.notice("PPU Cache Batch Creation was canceled");
+
+		if (!Emu.IsStopped())
+		{
+			QApplication::processEvents();
+			Emu.GracefulShutdown(false);
+		}
+
+		if (!pdlg->wasCanceled())
+		{
+			pdlg->close();
+		}
+		return;
 	}
-	else
-	{
-		pdlg->SetDeleteOnClose();
-		pdlg->setLabelText(tr("Created LLVM Caches for %n title(s)", "", created));
-		pdlg->setCancelButtonText(tr("OK"));
-		QApplication::beep();
-	}
+
+	pdlg->setLabelText(tr("Created PPU Caches for %n title(s)", "", created));
+	pdlg->setCancelButtonText(tr("OK"));
+	QApplication::beep();
 }
 
 void game_list_frame::BatchRemovePPUCaches()
@@ -2047,7 +2016,7 @@ void game_list_frame::BatchRemovePPUCaches()
 		return;
 	}
 
-	progress_dialog* pdlg = new progress_dialog(tr("PPU Cache Batch Removal"), tr("Removing all PPU caches"), tr("Cancel"), 0, total, false, this);
+	progress_dialog* pdlg = new progress_dialog(tr("PPU Cache Batch Removal"), tr("Removing all PPU caches"), tr("Cancel"), 0, total, true, this);
 	pdlg->setAutoClose(false);
 	pdlg->setAutoReset(false);
 	pdlg->show();
@@ -2057,6 +2026,7 @@ void game_list_frame::BatchRemovePPUCaches()
 	{
 		if (pdlg->wasCanceled())
 		{
+			game_list_log.notice("PPU Cache Batch Removal was canceled");
 			break;
 		}
 		QApplication::processEvents();
@@ -2067,18 +2037,9 @@ void game_list_frame::BatchRemovePPUCaches()
 		}
 	}
 
-	if (pdlg->wasCanceled())
-	{
-		pdlg->deleteLater(); // We did not allow deletion earlier to prevent segfaults when canceling.
-		game_list_log.notice("PPU Cache Batch Removal was canceled");
-	}
-	else
-	{
-		pdlg->SetDeleteOnClose();
-		pdlg->setLabelText(tr("%0/%1 caches cleared").arg(removed).arg(total));
-		pdlg->setCancelButtonText(tr("OK"));
-		QApplication::beep();
-	}
+	pdlg->setLabelText(tr("%0/%1 caches cleared").arg(removed).arg(total));
+	pdlg->setCancelButtonText(tr("OK"));
+	QApplication::beep();
 }
 
 void game_list_frame::BatchRemoveSPUCaches()
@@ -2101,7 +2062,7 @@ void game_list_frame::BatchRemoveSPUCaches()
 		return;
 	}
 
-	progress_dialog* pdlg = new progress_dialog(tr("SPU Cache Batch Removal"), tr("Removing all SPU caches"), tr("Cancel"), 0, total, false, this);
+	progress_dialog* pdlg = new progress_dialog(tr("SPU Cache Batch Removal"), tr("Removing all SPU caches"), tr("Cancel"), 0, total, true, this);
 	pdlg->setAutoClose(false);
 	pdlg->setAutoReset(false);
 	pdlg->show();
@@ -2111,6 +2072,7 @@ void game_list_frame::BatchRemoveSPUCaches()
 	{
 		if (pdlg->wasCanceled())
 		{
+			game_list_log.notice("SPU Cache Batch Removal was canceled. %d/%d folders cleared", removed, total);
 			break;
 		}
 		QApplication::processEvents();
@@ -2121,18 +2083,9 @@ void game_list_frame::BatchRemoveSPUCaches()
 		}
 	}
 
-	if (pdlg->wasCanceled())
-	{
-		pdlg->deleteLater(); // We did not allow deletion earlier to prevent segfaults when canceling.
-		game_list_log.notice("SPU Cache Batch Removal was canceled. %d/%d folders cleared", removed, total);
-	}
-	else
-	{
-		pdlg->SetDeleteOnClose();
-		pdlg->setLabelText(tr("%0/%1 caches cleared").arg(removed).arg(total));
-		pdlg->setCancelButtonText(tr("OK"));
-		QApplication::beep();
-	}
+	pdlg->setLabelText(tr("%0/%1 caches cleared").arg(removed).arg(total));
+	pdlg->setCancelButtonText(tr("OK"));
+	QApplication::beep();
 }
 
 void game_list_frame::BatchRemoveCustomConfigurations()
@@ -2153,7 +2106,7 @@ void game_list_frame::BatchRemoveCustomConfigurations()
 		return;
 	}
 
-	progress_dialog* pdlg = new progress_dialog(tr("Custom Configuration Batch Removal"), tr("Removing all custom configurations"), tr("Cancel"), 0, total, false, this);
+	progress_dialog* pdlg = new progress_dialog(tr("Custom Configuration Batch Removal"), tr("Removing all custom configurations"), tr("Cancel"), 0, total, true, this);
 	pdlg->setAutoClose(false);
 	pdlg->setAutoReset(false);
 	pdlg->show();
@@ -2163,6 +2116,7 @@ void game_list_frame::BatchRemoveCustomConfigurations()
 	{
 		if (pdlg->wasCanceled())
 		{
+			game_list_log.notice("Custom Configuration Batch Removal was canceled. %d/%d custom configurations cleared", removed, total);
 			break;
 		}
 		QApplication::processEvents();
@@ -2173,19 +2127,9 @@ void game_list_frame::BatchRemoveCustomConfigurations()
 		}
 	}
 
-	if (pdlg->wasCanceled())
-	{
-		pdlg->deleteLater(); // We did not allow deletion earlier to prevent segfaults when canceling.
-		game_list_log.notice("Custom Configuration Batch Removal was canceled. %d/%d custom configurations cleared", removed, total);
-	}
-	else
-	{
-		pdlg->SetDeleteOnClose();
-		pdlg->setLabelText(tr("%0/%1 custom configurations cleared").arg(removed).arg(total));
-		pdlg->setCancelButtonText(tr("OK"));
-		QApplication::beep();
-	}
-
+	pdlg->setLabelText(tr("%0/%1 custom configurations cleared").arg(removed).arg(total));
+	pdlg->setCancelButtonText(tr("OK"));
+	QApplication::beep();
 	Refresh(true);
 }
 
@@ -2207,7 +2151,7 @@ void game_list_frame::BatchRemoveCustomPadConfigurations()
 		return;
 	}
 
-	progress_dialog* pdlg = new progress_dialog(tr("Custom Pad Configuration Batch Removal"), tr("Removing all custom pad configurations"), tr("Cancel"), 0, total, false, this);
+	progress_dialog* pdlg = new progress_dialog(tr("Custom Pad Configuration Batch Removal"), tr("Removing all custom pad configurations"), tr("Cancel"), 0, total, true, this);
 	pdlg->setAutoClose(false);
 	pdlg->setAutoReset(false);
 	pdlg->show();
@@ -2217,6 +2161,7 @@ void game_list_frame::BatchRemoveCustomPadConfigurations()
 	{
 		if (pdlg->wasCanceled())
 		{
+			game_list_log.notice("Custom Pad Configuration Batch Removal was canceled. %d/%d custom pad configurations cleared", removed, total);
 			break;
 		}
 		QApplication::processEvents();
@@ -2227,19 +2172,9 @@ void game_list_frame::BatchRemoveCustomPadConfigurations()
 		}
 	}
 
-	if (pdlg->wasCanceled())
-	{
-		pdlg->deleteLater(); // We did not allow deletion earlier to prevent segfaults when canceling.
-		game_list_log.notice("Custom Pad Configuration Batch Removal was canceled. %d/%d custom pad configurations cleared", removed, total);
-	}
-	else
-	{
-		pdlg->SetDeleteOnClose();
-		pdlg->setLabelText(tr("%0/%1 custom pad configurations cleared").arg(removed).arg(total));
-		pdlg->setCancelButtonText(tr("OK"));
-		QApplication::beep();
-	}
-
+	pdlg->setLabelText(tr("%0/%1 custom pad configurations cleared").arg(removed).arg(total));
+	pdlg->setCancelButtonText(tr("OK"));
+	QApplication::beep();
 	Refresh(true);
 }
 
@@ -2263,7 +2198,7 @@ void game_list_frame::BatchRemoveShaderCaches()
 		return;
 	}
 
-	progress_dialog* pdlg = new progress_dialog(tr("Shader Cache Batch Removal"), tr("Removing all shader caches"), tr("Cancel"), 0, total, false, this);
+	progress_dialog* pdlg = new progress_dialog(tr("Shader Cache Batch Removal"), tr("Removing all shader caches"), tr("Cancel"), 0, total, true, this);
 	pdlg->setAutoClose(false);
 	pdlg->setAutoReset(false);
 	pdlg->show();
@@ -2273,6 +2208,7 @@ void game_list_frame::BatchRemoveShaderCaches()
 	{
 		if (pdlg->wasCanceled())
 		{
+			game_list_log.notice("Shader Cache Batch Removal was canceled");
 			break;
 		}
 		QApplication::processEvents();
@@ -2283,18 +2219,9 @@ void game_list_frame::BatchRemoveShaderCaches()
 		}
 	}
 
-	if (pdlg->wasCanceled())
-	{
-		pdlg->deleteLater(); // We did not allow deletion earlier to prevent segfaults when canceling.
-		game_list_log.notice("Shader Cache Batch Removal was canceled");
-	}
-	else
-	{
-		pdlg->SetDeleteOnClose();
-		pdlg->setLabelText(tr("%0/%1 shader caches cleared").arg(removed).arg(total));
-		pdlg->setCancelButtonText(tr("OK"));
-		QApplication::beep();
-	}
+	pdlg->setLabelText(tr("%0/%1 shader caches cleared").arg(removed).arg(total));
+	pdlg->setCancelButtonText(tr("OK"));
+	QApplication::beep();
 }
 
 void game_list_frame::ShowCustomConfigIcon(const game_info& game)
@@ -2344,7 +2271,7 @@ void game_list_frame::RepaintIcons(const bool& from_settings)
 		}
 		else
 		{
-			m_icon_color = gui::utils::get_label_color("gamelist_icon_background_color", Qt::transparent, Qt::transparent);
+			m_icon_color = gui::utils::get_label_color("gamelist_icon_background_color");
 		}
 	}
 
