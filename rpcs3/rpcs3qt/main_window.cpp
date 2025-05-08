@@ -39,7 +39,6 @@
 
 #include <thread>
 #include <charconv>
-#include <unordered_set>
 
 #include <QScreen>
 #include <QDirIterator>
@@ -49,7 +48,6 @@
 #include <QFontDatabase>
 #include <QBuffer>
 #include <QTemporaryFile>
-#include <QDesktopServices>
 
 #include "rpcs3_version.h"
 #include "Emu/IdManager.h"
@@ -57,11 +55,9 @@
 #include "Emu/vfs_config.h"
 #include "Emu/System.h"
 #include "Emu/system_utils.hpp"
-#include "Emu/system_config.h"
 
 #include "Crypto/unpkg.h"
 #include "Crypto/unself.h"
-#include "Crypto/unzip.h"
 #include "Crypto/decrypt_binaries.h"
 
 #include "Loader/PUP.h"
@@ -71,7 +67,6 @@
 
 #include "Utilities/Thread.h"
 #include "util/sysinfo.hpp"
-#include "util/serialization_ext.hpp"
 
 #include "ui_main_window.h"
 
@@ -592,7 +587,7 @@ void main_window::BootSavestate()
 	}
 
 	const QString file_path = QFileDialog::getOpenFileName(this, tr("Select Savestate To Boot"), qstr(fs::get_cache_dir() + "/savestates/"), tr(
-		"Savestate files (*.SAVESTAT *.SAVESTAT.gz);;"
+		"Savestate files (*.SAVESTAT);;"
 		"All files (*.*)"),
 		Q_NULLPTR, QFileDialog::DontResolveSymlinks);
 
@@ -657,7 +652,7 @@ void main_window::BootRsxCapture(std::string path)
 			is_stopped = true;
 		}
 
-		const QString file_path = QFileDialog::getOpenFileName(this, tr("Select RSX Capture"), qstr(fs::get_config_dir() + "captures/"), tr("RRC files (*.rrc *.RRC *.rrc.gz *.RRC.GZ);;All files (*.*)"));
+		const QString file_path = QFileDialog::getOpenFileName(this, tr("Select RSX Capture"), qstr(fs::get_config_dir() + "captures/"), tr("RRC files (*.rrc *.RRC);;All files (*.*)"));
 
 		if (file_path.isEmpty())
 		{
@@ -1048,8 +1043,7 @@ bool main_window::HandlePackageInstallation(QStringList file_paths, bool from_bo
 	if (success)
 	{
 		pdlg.SetValue(pdlg.maximum());
-
-		const u64 start_time = get_system_time();
+		std::this_thread::sleep_for(100ms);
 
 		for (usz i = 0; i < packages.size(); i++)
 		{
@@ -1084,6 +1078,8 @@ bool main_window::HandlePackageInstallation(QStringList file_paths, bool from_bo
 			}
 		}
 
+		m_game_list_frame->Refresh(true);
+
 		std::map<std::string, QString> bootable_paths_installed; // -> title id
 
 		for (usz index = 0; index < bootable_paths.size(); index++)
@@ -1096,41 +1092,80 @@ bool main_window::HandlePackageInstallation(QStringList file_paths, bool from_bo
 			bootable_paths_installed[bootable_paths[index]] = packages[index].title_id;
 		}
 
-		// Need to test here due to potential std::move later
-		const bool installed_a_whole_package_without_new_software = bootable_paths_installed.empty() && !cancelled;
-
-		if (!bootable_paths_installed.empty())
-		{
-			m_game_list_frame->AddRefreshedSlot([this, paths = std::move(bootable_paths_installed)](std::set<std::string>& claimed_paths) mutable
-			{
-				// Try to claim operaions on ID
-				for (auto it = paths.begin(); it != paths.end();)
-				{
-					std::string resolved_path = Emu.GetCallbacks().resolve_path(it->first);
-
-					if (resolved_path.empty() || claimed_paths.count(resolved_path))
-					{
-						it = paths.erase(it);
-					}
-					else
-					{
-						claimed_paths.emplace(std::move(resolved_path));
-						it++;
-					}
-				}
-
-				ShowOptionalGamePreparations(tr("Success!"), tr("Successfully installed software from package(s)!"), paths);
-			});
-		}
-
-		m_game_list_frame->Refresh(true);
-
-		std::this_thread::sleep_for(std::chrono::microseconds(100'000 - std::min<usz>(100'000, get_system_time() - start_time)));
 		pdlg.hide();
 
-		if (installed_a_whole_package_without_new_software)
+		if (!cancelled || !bootable_paths_installed.empty())
 		{
-			m_gui_settings->ShowInfoBox(tr("Success!"), tr("Successfully installed software from package(s)!"), gui::ib_pkg_success, this);
+			if (bootable_paths_installed.empty())
+			{
+				m_gui_settings->ShowInfoBox(tr("Success!"), tr("Successfully installed software from package(s)!"), gui::ib_pkg_success, this);
+				return true;
+			}
+
+			auto dlg = new QDialog(this);
+			dlg->setWindowTitle(tr("Success!"));
+
+			QVBoxLayout* vlayout = new QVBoxLayout(dlg);
+
+			QCheckBox* desk_check = new QCheckBox(tr("Add desktop shortcut(s)"));
+#ifdef _WIN32
+			QCheckBox* quick_check = new QCheckBox(tr("Add Start menu shortcut(s)"));
+#elif defined(__APPLE__)
+			QCheckBox* quick_check = new QCheckBox(tr("Add dock shortcut(s)"));
+#else
+			QCheckBox* quick_check = new QCheckBox(tr("Add launcher shortcut(s)"));
+#endif
+			QLabel* label = new QLabel(tr("Successfully installed software from package(s)!\nWould you like to install shortcuts to the installed software? (%1 new software detected)\n\n").arg(bootable_paths_installed.size()), dlg);
+
+			vlayout->addWidget(label);
+			vlayout->addStretch(10);
+			vlayout->addWidget(desk_check);
+			vlayout->addStretch(3);
+			vlayout->addWidget(quick_check);
+			vlayout->addStretch(3);
+
+			QDialogButtonBox* btn_box = new QDialogButtonBox(QDialogButtonBox::Ok);
+
+			vlayout->addWidget(btn_box);
+			dlg->setLayout(vlayout);
+
+			bool create_desktop_shortcuts = false;
+			bool create_app_shortcut = false;
+
+			connect(btn_box, &QDialogButtonBox::accepted, this, [&]()
+			{
+				create_desktop_shortcuts = desk_check->isChecked();
+				create_app_shortcut = quick_check->isChecked();
+				dlg->accept();
+			});
+
+			dlg->setAttribute(Qt::WA_DeleteOnClose);
+			dlg->exec();
+
+			std::set<gui::utils::shortcut_location> locations;
+#ifdef _WIN32
+			locations.insert(gui::utils::shortcut_location::rpcs3_shortcuts);
+#endif
+			if (create_desktop_shortcuts)
+			{
+				locations.insert(gui::utils::shortcut_location::desktop);
+			}
+			if (create_app_shortcut)
+			{
+				locations.insert(gui::utils::shortcut_location::applications);
+			}
+
+			for (const auto& [boot_path, title_id] : bootable_paths_installed)
+			{
+				for (const game_info& gameinfo : m_game_list_frame->GetGameInfo())
+				{
+					if (gameinfo && gameinfo->info.bootable && gameinfo->info.serial == sstr(title_id) && boot_path.starts_with(gameinfo->info.path))
+					{
+						m_game_list_frame->CreateShortcuts(gameinfo, locations);
+						break;
+					}
+				}
+			}
 		}
 	}
 	else
@@ -1389,27 +1424,10 @@ void main_window::HandlePupInstallation(const QString& file_path, const QString&
 
 	fs::file update_files_f = pup.get_file(0x300);
 
-	const usz update_files_size = update_files_f ? update_files_f.size() : 0;
-
-	if (!update_files_size)
+	if (!update_files_f)
 	{
 		gui_log.error("Error while installing firmware: Couldn't find installation packages database.");
 		critical(tr("Firmware installation failed: The provided file's contents are corrupted."));
-		return;
-	}
-
-	fs::device_stat dev_stat{};
-	if (!fs::statfs(g_cfg_vfs.get_dev_flash(), dev_stat))
-	{
-		gui_log.error("Error while installing firmware: Couldn't retrieve available disk space. ('%s')", g_cfg_vfs.get_dev_flash());
-		critical(tr("Firmware installation failed: Couldn't retrieve available disk space."));
-		return;
-	}
-
-	if (dev_stat.avail_free < update_files_size)
-	{
-		gui_log.error("Error while installing firmware: Out of disk space. ('%s', needed: %d bytes)", g_cfg_vfs.get_dev_flash(), update_files_size - dev_stat.avail_free);
-		critical(tr("Firmware installation failed: Out of disk space."));
 		return;
 	}
 
@@ -1509,15 +1527,7 @@ void main_window::HandlePupInstallation(const QString& file_path, const QString&
 		{
 			for (const auto& update_filename : update_filenames)
 			{
-				auto update_file_stream = update_files.get_file(update_filename);
-
-				if (update_file_stream->m_file_handler)
-				{
-					// Forcefully read all the data
-					update_file_stream->m_file_handler->handle_file_op(*update_file_stream, 0, update_file_stream->get_size(umax), nullptr);
-				}
-
-				fs::file update_file = fs::make_stream(std::move(update_file_stream->data));
+				fs::file update_file = update_files.get_file(update_filename);
 
 				SCEDecrypter self_dec(update_file);
 				self_dec.LoadHeaders();
@@ -1702,8 +1712,7 @@ void main_window::SaveWindowState() const
 
 void main_window::RepaintThumbnailIcons()
 {
-	const QColor color = gui::utils::get_foreground_color();
-	[[maybe_unused]] const QColor new_color = gui::utils::get_label_color("thumbnail_icon_color", color, color);
+	[[maybe_unused]] const QColor new_color = gui::utils::get_label_color("thumbnail_icon_color");
 
 	[[maybe_unused]] const auto icon = [&new_color](const QString& path)
 	{
@@ -1726,13 +1735,23 @@ void main_window::RepaintThumbnailIcons()
 
 void main_window::RepaintToolBarIcons()
 {
-	const QColor color = gui::utils::get_foreground_color();
-
 	std::map<QIcon::Mode, QColor> new_colors{};
-	new_colors[QIcon::Normal] = gui::utils::get_label_color("toolbar_icon_color", color, color);
-	new_colors[QIcon::Disabled] = gui::utils::get_label_color("toolbar_icon_color_disabled", Qt::gray, Qt::lightGray);
-	new_colors[QIcon::Active] = gui::utils::get_label_color("toolbar_icon_color_active", color, color);
-	new_colors[QIcon::Selected] = gui::utils::get_label_color("toolbar_icon_color_selected", color, color);
+	new_colors[QIcon::Normal] = gui::utils::get_label_color("toolbar_icon_color");
+
+	const QString sheet = static_cast<QApplication *>(QCoreApplication::instance())->styleSheet();
+
+	if (sheet.contains("toolbar_icon_color_disabled"))
+	{
+		new_colors[QIcon::Disabled] = gui::utils::get_label_color("toolbar_icon_color_disabled");
+	}
+	if (sheet.contains("toolbar_icon_color_active"))
+	{
+		new_colors[QIcon::Active] = gui::utils::get_label_color("toolbar_icon_color_active");
+	}
+	if (sheet.contains("toolbar_icon_color_selected"))
+	{
+		new_colors[QIcon::Selected] = gui::utils::get_label_color("toolbar_icon_color_selected");
+	}
 
 	const auto icon = [&new_colors](const QString& path)
 	{
@@ -1987,14 +2006,6 @@ void main_window::EnableMenus(bool enabled) const
 	ui->actionCreate_Savestate->setEnabled(enabled);
 }
 
-void main_window::OnAddBreakpoint(u32 addr) const
-{
-	if (m_debugger_frame)
-	{
-		m_debugger_frame->PerformAddBreakpointRequest(addr);
-	}
-}
-
 void main_window::OnEnableDiscEject(bool enabled) const
 {
 	ui->ejectDiscAct->setEnabled(enabled);
@@ -2230,7 +2241,7 @@ void main_window::RepaintGui()
 	RepaintToolBarIcons();
 	RepaintThumbnailIcons();
 
-	Q_EMIT RequestDialogRepaint();
+	Q_EMIT RequestTrophyManagerRepaint();
 }
 
 void main_window::RetranslateUI(const QStringList& language_codes, const QString& language)
@@ -2250,104 +2261,6 @@ void main_window::ShowTitleBars(bool show) const
 	m_game_list_frame->SetTitleBarVisible(show);
 	m_debugger_frame->SetTitleBarVisible(show);
 	m_log_frame->SetTitleBarVisible(show);
-}
-
-void main_window::ShowOptionalGamePreparations(const QString& title, const QString& message, std::map<std::string, QString> bootable_paths)
-{
-	if (bootable_paths.empty())
-	{
-		m_gui_settings->ShowInfoBox(title, message, gui::ib_pkg_success, this);
-		return;
-	}
-
-	QDialog* dlg = new QDialog(this);
-	dlg->setObjectName("game_prepare_window");
-	dlg->setWindowTitle(title);
-
-	QVBoxLayout* vlayout = new QVBoxLayout(dlg);
-
-	QCheckBox* desk_check = new QCheckBox(tr("Add desktop shortcut(s)"));
-#ifdef _WIN32
-	QCheckBox* quick_check = new QCheckBox(tr("Add Start menu shortcut(s)"));
-#elif defined(__APPLE__)
-	QCheckBox* quick_check = new QCheckBox(tr("Add dock shortcut(s)"));
-#else
-	QCheckBox* quick_check = new QCheckBox(tr("Add launcher shortcut(s)"));
-#endif
-	QCheckBox* precompile_check = new QCheckBox(tr("Precompile caches"));
-	QLabel* label = new QLabel(tr("%1\nWould you like to install shortcuts to the installed software and precompile caches? (%2 new software detected)\n\n").arg(message).arg(bootable_paths.size()), dlg);
-
-	vlayout->addWidget(label);
-	vlayout->addStretch(10);
-	vlayout->addWidget(desk_check);
-	vlayout->addStretch(3);
-	vlayout->addWidget(quick_check);
-	vlayout->addStretch(3);
-	vlayout->addWidget(precompile_check);
-	vlayout->addStretch(3);
-
-	precompile_check->setToolTip(tr("Spend time building data needed for game boot now instead of at launch."));
-
-	QDialogButtonBox* btn_box = new QDialogButtonBox(QDialogButtonBox::Ok);
-
-	vlayout->addWidget(btn_box);
-	dlg->setLayout(vlayout);
-
-	connect(btn_box, &QDialogButtonBox::accepted, this, [=, this, paths = std::move(bootable_paths)]()
-	{
-		const bool create_desktop_shortcuts = desk_check->isChecked();
-		const bool create_app_shortcut = quick_check->isChecked();
-		const bool create_caches = precompile_check->isChecked();
-
-		dlg->hide();
-		dlg->accept();
-
-		std::set<gui::utils::shortcut_location> locations;
-
-#ifdef _WIN32
-		locations.insert(gui::utils::shortcut_location::rpcs3_shortcuts);
-#endif
-		if (create_desktop_shortcuts)
-		{
-			locations.insert(gui::utils::shortcut_location::desktop);
-		}
-
-		if (create_app_shortcut)
-		{
-			locations.insert(gui::utils::shortcut_location::applications);
-		}
-
-		QList<game_info> game_data;
-
-		for (const auto& [boot_path, title_id] : paths)
-		{
-			for (const game_info& gameinfo : m_game_list_frame->GetGameInfo())
-			{
-				if (gameinfo && gameinfo->info.serial == sstr(title_id))
-				{
-					if (Emu.IsPathInsideDir(boot_path, gameinfo->info.path))
-					{
-						m_game_list_frame->CreateShortcuts(gameinfo, locations);
-
-						if (create_caches)
-						{
-							game_data.push_back(gameinfo);
-						}
-					}
-
-					break;
-				}
-			}
-		}
-
-		if (!game_data.isEmpty())
-		{
-			m_game_list_frame->BatchCreateCPUCaches(game_data);
-		}
-	});
-
-	dlg->setAttribute(Qt::WA_DeleteOnClose);
-	dlg->open();
 }
 
 void main_window::CreateActions()
@@ -2396,21 +2309,6 @@ void main_window::CreateConnects()
 	connect(ui->actionCreate_Savestate, &QAction::triggered, this, []()
 	{
 		gui_log.notice("User triggered savestate creation from utilities.");
-
-		if (!g_cfg.savestate.suspend_emu)
-		{
-			Emu.after_kill_callback = []()
-			{
-				Emu.Restart();
-			};
-		}
-
-		Emu.Kill(false, true);
-	});
-
-	connect(ui->actionCreate_Savestate_And_Exit, &QAction::triggered, this, []()
-	{
-		gui_log.notice("User triggered savestate creation and emulation stop from utilities.");
 		Emu.Kill(false, true);
 	});
 
@@ -2427,7 +2325,17 @@ void main_window::CreateConnects()
 
 		// Only select one folder for now
 		paths << QFileDialog::getExistingDirectory(this, tr("Select a folder containing one or more games"), qstr(fs::get_config_dir()), QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
-		AddGamesFromDirs(std::move(paths));
+
+		if (!paths.isEmpty())
+		{
+			Emu.GracefulShutdown(false);
+
+			for (const QString& path : paths)
+			{
+				AddGamesFromDir(path);
+			}
+			m_game_list_frame->Refresh(true);
+		}
 	});
 
 	connect(ui->bootRecentMenu, &QMenu::aboutToShow, this, [this]()
@@ -2598,7 +2506,7 @@ void main_window::CreateConnects()
 	});
 	connect(ui->exitAct, &QAction::triggered, this, &QWidget::close);
 
-	connect(ui->batchCreateCPUCachesAct, &QAction::triggered, m_game_list_frame, [list = m_game_list_frame]() { list->BatchCreateCPUCaches(); });
+	connect(ui->batchCreatePPUCachesAct, &QAction::triggered, m_game_list_frame, &game_list_frame::BatchCreatePPUCaches);
 	connect(ui->batchRemovePPUCachesAct, &QAction::triggered, m_game_list_frame, &game_list_frame::BatchRemovePPUCaches);
 	connect(ui->batchRemoveSPUCachesAct, &QAction::triggered, m_game_list_frame, &game_list_frame::BatchRemoveSPUCaches);
 	connect(ui->batchRemoveShaderCachesAct, &QAction::triggered, m_game_list_frame, &game_list_frame::BatchRemoveShaderCaches);
@@ -2749,14 +2657,14 @@ void main_window::CreateConnects()
 	connect(ui->confSavedataManagerAct, &QAction::triggered, this, [this]
 	{
 		save_manager_dialog* save_manager = new save_manager_dialog(m_gui_settings, m_persistent_settings);
-		connect(this, &main_window::RequestDialogRepaint, save_manager, &save_manager_dialog::HandleRepaintUiRequest);
+		connect(this, &main_window::RequestTrophyManagerRepaint, save_manager, &save_manager_dialog::HandleRepaintUiRequest);
 		save_manager->show();
 	});
 
 	connect(ui->actionManage_Trophy_Data, &QAction::triggered, this, [this]
 	{
 		trophy_manager_dialog* trop_manager = new trophy_manager_dialog(m_gui_settings);
-		connect(this, &main_window::RequestDialogRepaint, trop_manager, &trophy_manager_dialog::HandleRepaintUiRequest);
+		connect(this, &main_window::RequestTrophyManagerRepaint, trop_manager, &trophy_manager_dialog::HandleRepaintUiRequest);
 		trop_manager->show();
 	});
 
@@ -2830,7 +2738,7 @@ void main_window::CreateConnects()
 	connect(ui->toolsCheckConfigAct, &QAction::triggered, this, [this]
 	{
 		const QString path_last_cfg = m_gui_settings->GetValue(gui::fd_cfg_check).toString();
-		const QString file_path = QFileDialog::getOpenFileName(this, tr("Select rpcs3.log or config.yml"), path_last_cfg, tr("Log or Config files (*.log *.gz *.txt *.yml);;Log files (*.log *.gz);;Config Files (*.yml);;Text Files (*.txt);;All files (*.*)"));
+		const QString file_path = QFileDialog::getOpenFileName(this, tr("Select rpcs3.log or config.yml"), path_last_cfg, tr("Log or Config files (*.log *.txt *.yml);;Log files (*.log);;Config Files (*.yml);;Text Files (*.txt);;All files (*.*)"));
 		if (file_path.isEmpty())
 		{
 			// Aborted
@@ -2839,7 +2747,7 @@ void main_window::CreateConnects()
 
 		const QFileInfo file_info(file_path);
 
-		if (file_info.isExecutable() || !(file_path.endsWith(".log") || file_path.endsWith(".log.gz") || file_path.endsWith(".txt") || file_path.endsWith(".yml")))
+		if (file_info.isExecutable() || !(file_path.endsWith(".log") || file_path.endsWith(".txt") || file_path.endsWith(".yml")))
 		{
 			if (QMessageBox::question(this, tr("Weird file!"), tr("This file seems to have an unexpected type:\n%0\n\nCheck anyway?").arg(file_path)) != QMessageBox::Yes)
 			{
@@ -2847,31 +2755,8 @@ void main_window::CreateConnects()
 			}
 		}
 
-		bool failed = false;
-		QString content;
-
-		if (file_path.endsWith(".gz"))
-		{
-			if (fs::file file{file_path.toStdString()})
-			{
-				const std::vector<u8> decompressed = unzip(file.to_vector<u8>());
-				content = QString::fromUtf8(reinterpret_cast<const char*>(decompressed.data()), decompressed.size());
-			}
-			else
-			{
-				failed = true;
-			}
-		}
-		else if (QFile file(file_path); file.exists() && file.open(QIODevice::ReadOnly))
-		{
-			content = file.readAll();
-		}
-		else
-		{
-			failed = true;
-		}
-
-		if (failed)
+		QFile file(file_path);
+		if (!file.exists() || !file.open(QIODevice::ReadOnly))
 		{
 			QMessageBox::warning(this, tr("Failed to open file"), tr("The file could not be opened:\n%0").arg(file_path));
 			return;
@@ -2879,8 +2764,8 @@ void main_window::CreateConnects()
 
 		m_gui_settings->SetValue(gui::fd_cfg_check, file_info.path());
 
-		config_checker* dlg = new config_checker(this, content, file_path.endsWith(".log") || file_path.endsWith(".log.gz"));
-		dlg->open();
+		config_checker* dlg = new config_checker(this, file.readAll(), file_path.endsWith(".log"));
+		dlg->exec();
 	});
 
 	connect(ui->toolskernel_explorerAct, &QAction::triggered, this, [this]
@@ -3040,11 +2925,6 @@ void main_window::CreateConnects()
 		welcome->open();
 	});
 
-	connect(ui->supportAct, &QAction::triggered, this, [this]
-	{
-		QDesktopServices::openUrl(QUrl("https://www.patreon.com/Nekotekina"));
-	});
-
 	connect(ui->aboutAct, &QAction::triggered, this, [this]
 	{
 		about_dialog dlg(this);
@@ -3177,7 +3057,7 @@ void main_window::CreateDockWindows()
 		}
 	});
 
-	connect(m_log_frame, &log_frame::PerformGoToOnDebugger, this, [this](const QString& text_argument, bool is_address, bool test_only, std::shared_ptr<bool> signal_accepted)
+	connect(m_log_frame, &log_frame::PerformGoToOnDebugger, this, [this](const QString& text_argument, bool test_only, std::shared_ptr<bool> signal_accepted)
 	{
 		if (m_debugger_frame && m_debugger_frame->isVisible())
 		{
@@ -3188,14 +3068,7 @@ void main_window::CreateDockWindows()
 
 			if (!test_only)
 			{
-				if (is_address)
-				{
-					m_debugger_frame->PerformGoToRequest(text_argument);
-				}
-				else
-				{
-					m_debugger_frame->PerformGoToThreadRequest(text_argument);
-				}
+				m_debugger_frame->PerformGoToRequest(text_argument);
 			}
 		}
 	});
@@ -3519,74 +3392,16 @@ void main_window::closeEvent(QCloseEvent* closeEvent)
 
 /**
 Add valid disc games to gamelist (games.yml)
-@param paths = dir paths to scan for game
+@param path = dir path to scan for game
 */
-void main_window::AddGamesFromDirs(QStringList&& paths)
+void main_window::AddGamesFromDir(const QString& path)
 {
-	if (paths.isEmpty())
+	if (!QFileInfo(path).isDir())
 	{
 		return;
 	}
 
-	// Obtain list of previously existing entries under the specificied parent paths for comparison
-	std::unordered_set<std::string> existing;
-
-	for (const game_info& game : m_game_list_frame->GetGameInfo())
-	{
-		if (game)
-		{
-			for (const auto& dir_path : paths)
-			{
-				if (dir_path.startsWith(game->info.path.c_str()) && fs::exists(game->info.path))
-				{
-					existing.insert(game->info.path);
-					break;
-				}
-			}
-		}
-	}
-
-	for (const QString& path : paths)
-	{
-		Emu.AddGamesFromDir(sstr(path));
-	}
-
-	m_game_list_frame->AddRefreshedSlot([this, paths = std::move(paths), existing = std::move(existing)](std::set<std::string>& claimed_paths)
-	{
-		// Execute followup operations only for newly added entries under the specified paths
-		std::map<std::string, QString> paths_added; // -> title id
-
-		for (const game_info& game : m_game_list_frame->GetGameInfo())
-		{
-			if (game && !existing.contains(game->info.path))
-			{
-				for (const auto& dir_path : paths)
-				{
-					if (Emu.IsPathInsideDir(game->info.path, sstr(dir_path)))
-					{
-						// Try to claim operaion on directory path
-
-						std::string resolved_path = Emu.GetCallbacks().resolve_path(game->info.path);
-
-						if (!resolved_path.empty() && !claimed_paths.count(resolved_path))
-						{
-							claimed_paths.emplace(game->info.path);
-							paths_added.emplace(game->info.path, qstr(game->info.serial));
-						}
-
-						break;
-					}
-				}
-			}
-		}
-
-		if (!paths_added.empty())
-		{
-			ShowOptionalGamePreparations(tr("Success!"), tr("Successfully added software to game list from path(s)!"), paths_added);
-		}
-	});
-
-	m_game_list_frame->Refresh(true);
+	Emu.AddGamesFromDir(sstr(path));
 }
 
 /**
@@ -3693,12 +3508,12 @@ main_window::drop_type main_window::IsValidFile(const QMimeData& md, QStringList
 		}
 		else if (m_drop_file_url_list.size() == 1)
 		{
-			if (suffix_lo == "rrc" || path.toLower().endsWith(".rrc.gz"))
+			if (suffix_lo == "rrc")
 			{
 				type = drop_type::drop_rrc;
 			}
 			// The emulator allows to execute ANY filetype, just not from drag-and-drop because it is confusing to users
-			else if (path.toLower().endsWith(".savestat.gz") || suffix_lo == "savestat" || suffix_lo == "sprx" || suffix_lo == "self" || suffix_lo == "bin" || suffix_lo == "prx" || suffix_lo == "elf" || suffix_lo == "o")
+			else if (suffix_lo == "savestat" || suffix_lo == "sprx" || suffix_lo == "self" || suffix_lo == "bin" || suffix_lo == "prx" || suffix_lo == "elf" || suffix_lo == "o")
 			{
 				type = drop_type::drop_game;
 			}
@@ -3763,7 +3578,12 @@ void main_window::dropEvent(QDropEvent* event)
 	}
 	case drop_type::drop_dir: // import valid games to gamelist (games.yaml)
 	{
-		AddGamesFromDirs(std::move(drop_paths));
+		for (const auto& path : drop_paths)
+		{
+			AddGamesFromDir(path);
+		}
+
+		m_game_list_frame->Refresh(true);
 		break;
 	}
 	case drop_type::drop_game: // import valid games to gamelist (games.yaml)
