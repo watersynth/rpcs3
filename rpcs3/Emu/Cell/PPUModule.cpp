@@ -13,7 +13,6 @@
 #include "Emu/VFS.h"
 
 #include "Emu/Cell/PPUOpcodes.h"
-#include "Emu/Cell/SPUThread.h"
 #include "Emu/Cell/PPUAnalyser.h"
 
 #include "Emu/Cell/lv2/sys_process.h"
@@ -358,7 +357,7 @@ static void ppu_initialize_modules(ppu_linkage_info* link, utils::serial* ar = n
 
 			while (true)
 			{
-				const std::string name = ar.pop<std::string>();
+				const std::string name = ar.operator std::string();
 
 				if (name.empty())
 				{
@@ -370,10 +369,10 @@ static void ppu_initialize_modules(ppu_linkage_info* link, utils::serial* ar = n
 
 				auto& variable = _module->variables;
 
-				for (usz i = 0, end = ar.pop<usz>(); i < end; i++)
+				for (u32 i = 0, end = ar.operator usz(); i < end; i++)
 				{
-					auto* ptr = &::at32(variable, ar.pop<u32>());
-					ptr->addr = ar.pop<u32>();
+					auto* ptr = &::at32(variable, ar.operator u32());
+					ptr->addr = ar.operator u32();
 					ensure(!!ptr->var);
 				}
 			}
@@ -973,7 +972,7 @@ void ppu_manual_load_imports_exports(u32 imports_start, u32 imports_size, u32 ex
 	auto& link = g_fxo->get<ppu_linkage_info>();
 
 	ppu_module vm_all_fake_module{};
-	vm_all_fake_module.segs.emplace_back(ppu_segment{0x10000, 0 - 0x10000u, 1 /*LOAD*/, 0, 0 - 0x1000u, vm::base(0x10000)});
+	vm_all_fake_module.segs.emplace_back(ppu_segment{0x10000, -0x10000u, 1 /*LOAD*/, 0, -0x1000u, vm::base(0x10000)});
 	vm_all_fake_module.addr_to_seg_index.emplace(0x10000, 0);
 
 	ppu_load_exports(vm_all_fake_module, &link, exports_start, exports_start + exports_size, false, &loaded_flags);
@@ -1052,12 +1051,7 @@ void init_ppu_functions(utils::serial* ar, bool full = false)
 
 	if (ar)
 	{
-		const u32 addr = g_fxo->init<ppu_function_manager>(*ar)->addr;
-
-		if (addr % 0x1000 || !vm::check_addr(addr))
-		{
-			fmt::throw_exception("init_ppu_functions(): Failure to initialize function manager. (addr=0x%x, %s)", addr, *ar);
-		}
+		ensure(vm::check_addr(g_fxo->init<ppu_function_manager>(*ar)->addr));
 	}
 	else
 		g_fxo->init<ppu_function_manager>();
@@ -1076,187 +1070,11 @@ static void ppu_check_patch_spu_images(const ppu_module& mod, const ppu_segment&
 		return;
 	}
 
-	const bool is_firmware = mod.path.starts_with(vfs::get("/dev_flash/"));
-
-	const auto _main = g_fxo->try_get<main_ppu_module>();
-
 	const std::string_view seg_view{ensure(mod.get_ptr<char>(seg.addr)), seg.size};
 
-	auto find_first_of_multiple = [](std::string_view data, std::initializer_list<std::string_view> values, usz index)
-	{
-		u32 pos = static_cast<u32>(data.size());
-
-		for (std::string_view value : values)
-		{
-			if (usz pos0 = data.substr(index, pos - index).find(value); pos0 != umax && pos0 + index < pos)
-			{
-				pos = static_cast<u32>(pos0 + index);
-			}
-		}
-
-		return pos;
-	};
-
-	extern void utilize_spu_data_segment(u32 vaddr, const void* ls_data_vaddr, u32 size);
-
-	// Search for [stqd lr,0x10(sp)] instruction or ELF file signature, whichever comes first
-	const std::initializer_list<std::string_view> prefixes = {"\177ELF"sv, "\x24\0\x40\x80"sv};
-
-	u32 prev_bound = 0;
-
-	for (u32 i = find_first_of_multiple(seg_view, prefixes, 0); i < seg.size; i = find_first_of_multiple(seg_view, prefixes, utils::align<u32>(i + 1, 4)))
+	for (usz i = seg_view.find("\177ELF"); i < seg.size; i = seg_view.find("\177ELF", i + 4))
 	{
 		const auto elf_header = ensure(mod.get_ptr<u8>(seg.addr + i));
-
-		if (i % 4 == 0 && std::memcmp(elf_header, "\x24\0\x40\x80", 4) == 0)
-		{
-			bool next = true;
-			const u32 old_i = i;
-
-			for (u32 search = i & -128, tries = 10; tries && search >= prev_bound; tries--, search = utils::sub_saturate<u32>(search, 128))
-			{
-				if (seg_view[search] != 0x42 && seg_view[search] != 0x43)
-				{
-					continue;
-				}
-
-				const u32 inst1 = read_from_ptr<be_t<u32>>(seg_view, search);
-				const u32 inst2 = read_from_ptr<be_t<u32>>(seg_view, search + 4);
-				const u32 inst3 = read_from_ptr<be_t<u32>>(seg_view, search + 8);
-				const u32 inst4 = read_from_ptr<be_t<u32>>(seg_view, search + 12);
-
-				if ((inst1 & 0xfe'00'00'7f) != 0x42000002 || (inst2 & 0xfe'00'00'7f) != 0x42000002 || (inst3 & 0xfe'00'00'7f) != 0x42000002 || (inst4 & 0xfe'00'00'7f) != 0x42000002)
-				{
-					continue;
-				}
-
-				ppu_log.success("Found SPURS GUID Pattern at 0x%05x", search + seg.addr);
-				i = search;
-				next = false;
-				break;
-			}
-
-			if (next)
-			{
-				continue;
-			}
-
-			std::string_view ls_segment = seg_view.substr(i);
-
-			// Bound to a bit less than LS size
-			ls_segment = ls_segment.substr(0, 0x38000);
-
-			for (u32 addr_last = 0, valid_count = 0, invalid_count = 0;;)
-			{
-				const u32 instruction = static_cast<u32>(ls_segment.find("\x24\0\x40\x80"sv, addr_last));
-
-				if (instruction != umax)
-				{
-					if (instruction % 4 != i % 4)
-					{
-						// Unaligned, continue
-						addr_last = instruction + (i % 4 - instruction % 4) % 4;
-						continue;
-					}
-
-					// FIXME: This seems to terminate SPU code prematurely in some cases
-					// Likely due to absolute branches
-					if (spu_thread::is_exec_code(instruction, {reinterpret_cast<const u8*>(ls_segment.data()), ls_segment.size()}, 0))
-					{
-						addr_last = instruction + 4;
-						valid_count++;
-						invalid_count = 0;
-						continue;
-					}
-
-					if (invalid_count == 0)
-					{
-						// Allow a single case of invalid data
-						addr_last = instruction + 4;
-						invalid_count++;
-						continue;
-					}
-
-					addr_last = instruction;
-				}
-
-				if (addr_last >= 0x80 && valid_count >= 2)
-				{
-					const u32 begin = i & -128;
-					u32 end = std::min<u32>(seg.size, utils::align<u32>(i + addr_last + 256, 128));
-
-					u32 guessed_ls_addr = 0;
-
-					// Try to guess LS address by observing the pattern for disable/enable interrupts
-					// ILA R2, PC + 8
-					// BIE/BID R2
-
-					for (u32 found = 0, last_vaddr = 0, it = begin + 16; it < end - 16; it += 4)
-					{
-						const u32 inst1 = read_from_ptr<be_t<u32>>(seg_view, it);
-						const u32 inst2 = read_from_ptr<be_t<u32>>(seg_view, it + 4);
-						const u32 inst3 = read_from_ptr<be_t<u32>>(seg_view, it + 8);
-						const u32 inst4 = read_from_ptr<be_t<u32>>(seg_view, it + 12);
-
-						if ((inst1 & 0xfe'00'00'7f) == 0x42000002 && (inst2 & 0xfe'00'00'7f) == 0x42000002 && (inst3 & 0xfe'00'00'7f) == 0x42000002 && (inst4 & 0xfe'00'00'7f) == 0x42000002)
-						{
-							// SPURS GUID pattern
-							end = it;
-							ppu_log.success("Found SPURS GUID Pattern for terminator at 0x%05x", end + seg.addr);
-							break;
-						}
-
-						if ((inst1 >> 7) % 4 == 0 && (inst1 & 0xfe'00'00'7f) == 0x42000002 && (inst2 == 0x35040100 || inst2 == 0x35080100))
-						{
-							const u32 addr_inst = (inst1 >> 7) % 0x40000;
-
-							if (u32 addr_seg = addr_inst - std::min<u32>(it + 8 - begin, addr_inst))
-							{
-								if (last_vaddr != addr_seg)
-								{
-									guessed_ls_addr = 0;
-									found = 0;
-								}
-
-								found++;
-								last_vaddr = addr_seg;
-
-								if (found >= 2)
-								{
-									// Good segment address
-									guessed_ls_addr = last_vaddr;
-									ppu_log.notice("Found IENABLE/IDSIABLE Pattern at 0x%05x", it + seg.addr);
-								}
-							}
-						}
-					}
-
-					if (guessed_ls_addr)
-					{
-						end = begin + std::min<u32>(end - begin, SPU_LS_SIZE - guessed_ls_addr);
-					}
-
-					ppu_log.success("Found valid roaming SPU code at 0x%x..0x%x (guessed_ls_addr=0x%x)", seg.addr + begin, seg.addr + end, guessed_ls_addr);
-
-					if (!is_firmware && _main == &mod)
-					{
-						// Siginify that the base address is unknown by passing 0
-						utilize_spu_data_segment(guessed_ls_addr ? guessed_ls_addr : 0x4000, seg_view.data() + begin, end - begin);
-					}
-
-					i = std::max<u32>(end, i + 4) - 4;
-					prev_bound = i + 4;
-				}
-				else
-				{
-					i = old_i;
-				}
-
-				break;
-			}
-
-			continue;
-		}
 
 		// Try to load SPU image
 		const spu_exec_object obj(fs::file(elf_header, seg.size - i));
@@ -1289,7 +1107,7 @@ static void ppu_check_patch_spu_images(const ppu_module& mod, const ppu_segment&
 
 			if (prog.p_type == 0x1u /* LOAD */ && prog.p_filesz > 0u)
 			{
-				if (prog.p_vaddr && !is_firmware && _main == &mod)
+				if (prog.p_vaddr)
 				{
 					extern void utilize_spu_data_segment(u32 vaddr, const void* ls_data_vaddr, u32 size);
 
@@ -1308,12 +1126,10 @@ static void ppu_check_patch_spu_images(const ppu_module& mod, const ppu_segment&
 
 				if (!name.empty())
 				{
-					fmt::append(dump, "\n\tSPUNAME: '%s'", name);
+					fmt::append(dump, "\n\tSPUNAME: '%s' (image addr: 0x%x)", name, seg.addr + i);
 				}
 			}
 		}
-
-		fmt::append(dump, " (image addr: 0x%x, size: 0x%x)", seg.addr + i, obj.highest_offset);
 
 		sha1_finish(&sha2, sha1_hash);
 
@@ -1339,11 +1155,6 @@ static void ppu_check_patch_spu_images(const ppu_module& mod, const ppu_segment&
 		// Try to patch each segment, will only succeed if the address exists in SPU local storage
 		for (const auto& prog : obj.progs)
 		{
-			if (Emu.DeserialManager())
-			{
-				break;
-			}
-
 			// Apply the patch
 			applied += g_fxo->get<patch_engine>().apply(hash, [&](u32 addr, u32 /*size*/) { return addr + elf_header + prog.p_offset; }, prog.p_filesz, prog.p_vaddr);
 
@@ -1362,9 +1173,6 @@ static void ppu_check_patch_spu_images(const ppu_module& mod, const ppu_segment&
 		{
 			ppu_loader.success("SPU executable hash: %s (<- %u)%s", hash, applied.size(), dump);
 		}
-
-		i += ::narrow<u32>(obj.highest_offset) - 4;
-		prev_bound = i + 4;
 	}
 }
 
@@ -1429,7 +1237,7 @@ struct prx_names_table
 
 			// Doesn't support addresses above 256MB because it wastes memory and is very unlikely (if somehow does occur increase it)
 			const u32 max0 = (seg.addr + seg.size - 1) >> 16;
-			const u32 max = std::min<u32>(::size32(lut), max0);
+			const u32 max = std::min<u32>(std::size(lut), max0);
 
 			if (max0 > max)
 			{
@@ -1625,9 +1433,9 @@ std::shared_ptr<lv2_prx> ppu_load_prx(const ppu_prx_object& elf, bool virtual_lo
 			{
 				const auto& rel = reinterpret_cast<const ppu_prx_relocation_info&>(prog.bin[i]);
 
-				if (rel.offset >= utils::align<u64>(::at32(prx->segs, rel.index_addr).size, 0x100))
+				if (rel.offset >= ::at32(prx->segs, rel.index_addr).size)
 				{
-					fmt::throw_exception("Relocation offset out of segment memory! (offset=0x%x, index_addr=%u, seg_size=0x%x)", rel.offset, rel.index_addr, prx->segs[rel.index_addr].size);
+					fmt::throw_exception("Relocation offset out of segment memory! (offset=0x%x, index_addr=%u)", rel.offset, rel.index_addr);
 				}
 
 				const u32 data_base = rel.index_value == 0xFF ? 0 : ::at32(prx->segs, rel.index_value).addr;
@@ -1743,7 +1551,7 @@ std::shared_ptr<lv2_prx> ppu_load_prx(const ppu_prx_object& elf, bool virtual_lo
 		};
 
 		// Access library information (TODO)
-		const auto lib_info = ensure(prx->get_ptr<const ppu_prx_library_info>(::narrow<u32>(prx->segs[0].addr + elf.progs[0].p_paddr - elf.progs[0].p_offset)));
+		const auto lib_info = ensure(prx->get_ptr<const ppu_prx_library_info>(prx->segs[0].addr + elf.progs[0].p_paddr - elf.progs[0].p_offset));
 		const std::string lib_name = lib_info->name;
 
 		strcpy_trunc(prx->module_info_name, lib_name);
@@ -1754,7 +1562,7 @@ std::shared_ptr<lv2_prx> ppu_load_prx(const ppu_prx_object& elf, bool virtual_lo
 		prx->exports_start = lib_info->exports_start;
 		prx->exports_end = lib_info->exports_end;
 
-		for (u32 start = prx->exports_start, size = 0;; size++)
+		for (usz start = prx->exports_start, size = 0;; size++)
 		{
 			if (start >= prx->exports_end)
 			{
@@ -1812,7 +1620,7 @@ std::shared_ptr<lv2_prx> ppu_load_prx(const ppu_prx_object& elf, bool virtual_lo
 
 	std::basic_string<u32> applied;
 
-	for (usz i = Emu.DeserialManager() ? prx->segs.size() : 0; i < prx->segs.size(); i++)
+	for (usz i = 0; i < prx->segs.size(); i++)
 	{
 		const auto& seg = prx->segs[i];
 
@@ -2470,7 +2278,7 @@ bool ppu_load_exec(const ppu_exec_object& elf, bool virtual_load, const std::str
 
 	_main.elf_entry = static_cast<u32>(elf.header.e_entry);
 	_main.seg0_code_end = end;
-	_main.applied_patches = applied;
+	_main.applied_pathes = applied;
 
 	if (!virtual_load)
 	{
@@ -2617,7 +2425,7 @@ bool ppu_load_exec(const ppu_exec_object& elf, bool virtual_load, const std::str
 
 	ensure(ppu->stack_size > stack_alloc_size);
 
-	vm::ptr<u64> args = vm::cast(static_cast<u32>(ppu->stack_addr + ppu->stack_size - stack_alloc_size - utils::align<u32>(::size32(Emu.data), 0x10)));
+	vm::ptr<u64> args = vm::cast(static_cast<u32>(ppu->stack_addr + ppu->stack_size - stack_alloc_size - utils::align<u32>(Emu.data.size(), 0x10)));
 	vm::ptr<u8> args_data = vm::cast(args.addr() + pointers_storage_size);
 
 	const vm::ptr<u64> argv = args;
@@ -2861,9 +2669,9 @@ std::pair<std::shared_ptr<lv2_overlay>, CellError> ppu_load_overlay(const ppu_ex
 	}
 
 	// Apply the patch
-	auto applied = g_fxo->get<patch_engine>().apply(!Emu.DeserialManager() ? std::string{} : hash, [ovlm](u32 addr, u32 size) { return ovlm->get_ptr<u8>(addr, size); });
+	auto applied = g_fxo->get<patch_engine>().apply(hash, [ovlm](u32 addr, u32 size) { return ovlm->get_ptr<u8>(addr, size); });
 
-	if (!Emu.DeserialManager() && !Emu.GetTitleID().empty())
+	if (!Emu.GetTitleID().empty())
 	{
 		// Alternative patch
 		applied += g_fxo->get<patch_engine>().apply(Emu.GetTitleID() + '-' + hash, [ovlm](u32 addr, u32 size) { return ovlm->get_ptr<u8>(addr, size); });
@@ -2997,23 +2805,13 @@ std::pair<std::shared_ptr<lv2_overlay>, CellError> ppu_load_overlay(const ppu_ex
 	}
 
 	ovlm->entry = static_cast<u32>(elf.header.e_entry);
-	ovlm->seg0_code_end = end;
-	ovlm->applied_patches = std::move(applied);
-
-	const bool is_being_used_in_emulation = (vm::base(ovlm->segs[0].addr) == ovlm->segs[0].ptr);
-
-	if (!is_being_used_in_emulation)
-	{
-		// Postpone to later
-		return {std::move(ovlm), {}};
-	}
 
 	const auto cpu = cpu_thread::get_current();
 
 	// Analyse executable (TODO)
-	if (!ovlm->analyse(0, ovlm->entry, end, ovlm->applied_patches, !cpu ? std::function<bool()>() : [cpu]()
+	if (!ovlm->analyse(0, ovlm->entry, end, applied, !cpu ? std::function<bool()>() : [cpu, is_being_used_in_emulation = (vm::base(ovlm->segs[0].addr) == ovlm->segs[0].ptr)]()
 	{
-		return !!(cpu->state & cpu_flag::exit);
+		return is_being_used_in_emulation && cpu->state & cpu_flag::exit;
 	}))
 	{
 		return {nullptr, CellError{CELL_CANCEL + 0u}};
@@ -3024,7 +2822,7 @@ std::pair<std::shared_ptr<lv2_overlay>, CellError> ppu_load_overlay(const ppu_ex
 
 	if (!ar && !virtual_load)
 	{
-		ensure(idm::import_existing<lv2_obj, lv2_overlay>(ovlm));
+		idm::import_existing<lv2_obj, lv2_overlay>(ovlm);
 		try_spawn_ppu_if_exclusive_program(*ovlm);
 	}
 
