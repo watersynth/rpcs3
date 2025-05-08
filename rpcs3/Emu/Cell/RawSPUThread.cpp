@@ -383,7 +383,7 @@ void spu_load_exec(const spu_exec_object& elf)
 	spu->status_npc = {SPU_STATUS_RUNNING, elf.header.e_entry};
 	atomic_storage<u32>::release(spu->pc, elf.header.e_entry);
 
-	const auto funcs = spu->discover_functions(0, { spu->ls , SPU_LS_SIZE }, true, umax);
+	const auto funcs = spu->discover_functions(spu->ls, umax);
 
 	for (u32 addr : funcs)
 	{
@@ -404,7 +404,7 @@ void spu_load_rel_exec(const spu_rel_object& elf)
 	ensure(vm::get(vm::spu)->falloc(spu->vm_offset(), SPU_LS_SIZE, &spu->shm, vm::page_size_64k));
 	spu->map_ls(*spu->shm, spu->ls);
 
-	u32 total_memsize = 0;
+	u64 total_memsize = 0;
 
 	// Compute executable data size
 	for (const auto& shdr : elf.shdrs)
