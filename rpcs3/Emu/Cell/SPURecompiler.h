@@ -34,18 +34,7 @@ public:
 
 	void add(const struct spu_program& func);
 
-	static void initialize(bool build_existing_cache = true);
-
-	struct precompile_data_t
-	{
-		u32 vaddr;
-		std::basic_string<u32> inst_data;
-		std::vector<u32> funcs;
-	};
-
-	bool collect_funcs_to_precompile = true;
-
-	lf_queue<precompile_data_t> precompile_funcs;
+	static void initialize();
 };
 
 struct spu_program
@@ -326,7 +315,7 @@ public:
 	static void old_interpreter(spu_thread&, void* ls, u8*);
 
 	// Get the function data at specified address
-	spu_program analyse(const be_t<u32>* ls, u32 entry_point, std::map<u32, std::basic_string<u32>>* out_target_list = nullptr);
+	spu_program analyse(const be_t<u32>* ls, u32 entry_point);
 
 	// Print analyser internal state
 	void dump(const spu_program& result, std::string& out);
