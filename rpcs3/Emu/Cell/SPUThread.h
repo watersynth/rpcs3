@@ -513,7 +513,7 @@ enum FPSCR_EX
 class SPU_FPSCR
 {
 public:
-	u32 _u32[4]{};
+	u32 _u32[4];
 
 	SPU_FPSCR() {}
 
@@ -526,7 +526,6 @@ public:
 	{
 		memset(this, 0, sizeof(*this));
 	}
-
 	//slice -> 0 - 1 (double-precision slice index)
 	//NOTE: slices follow v128 indexing, i.e. slice 0 is RIGHT end of register!
 	//roundTo -> FPSCR_RN_*
@@ -536,7 +535,6 @@ public:
 		//rounding is located in the left end of the FPSCR
 		this->_u32[3] = (this->_u32[3] & ~(3 << shift)) | (roundTo << shift);
 	}
-
 	//Slice 0 or 1
 	u8 checkSliceRounding(u8 slice) const
 	{
@@ -573,11 +571,11 @@ public:
 	//exception: FPSCR_D* bitmask
 	void setDoublePrecisionExceptionFlags(u8 slice, u32 exceptions)
 	{
-		_u32[1 + slice] |= exceptions;
+		_u32[1+slice] |= exceptions;
 	}
 
 	// Write the FPSCR
-	void Write(const v128& r)
+	void Write(const v128 & r)
 	{
 		_u32[3] = r._u32[3] & 0x00000F07;
 		_u32[2] = r._u32[2] & 0x00003F07;
@@ -586,7 +584,7 @@ public:
 	}
 
 	// Read the FPSCR
-	void Read(v128& r) const
+	void Read(v128 & r)
 	{
 		r._u32[3] = _u32[3];
 		r._u32[2] = _u32[2];
@@ -618,8 +616,6 @@ enum class spu_debugger_mode : u32
 
 	max_mode,
 };
-
-enum class spu_block_hash : u64 {};
 
 class spu_thread : public cpu_thread
 {
@@ -825,12 +821,12 @@ public:
 	u32 get_mfc_completed() const;
 
 	bool process_mfc_cmd();
-	ch_events_t get_events(u64 mask_hint = umax, bool waiting = false, bool reading = false);
+	ch_events_t get_events(u32 mask_hint = -1, bool waiting = false, bool reading = false);
 	void set_events(u32 bits);
 	void set_interrupt_status(bool enable);
 	bool check_mfc_interrupts(u32 next_pc);
-	static bool is_exec_code(u32 addr, std::span<const u8> ls_ptr, u32 base_addr = 0); // Only a hint, do not rely on it other than debugging purposes
-	static std::vector<u32> discover_functions(u32 base_addr, std::span<const u8> ls, bool is_known_addr, u32 /*entry*/);
+	static bool is_exec_code(u32 addr, const void* ls_ptr); // Only a hint, do not rely on it other than debugging purposes
+	static std::vector<u32> discover_functions(const void* ls_start, u32 /*entry*/);
 	u32 get_ch_count(u32 ch);
 	s64 get_ch_value(u32 ch);
 	bool set_ch_value(u32 ch, u32 value);
